@@ -18,7 +18,7 @@ impl AsBytes for String {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Node<T>
     where T: AsBytes + Clone,
 {
@@ -32,6 +32,7 @@ pub struct MerkleTree<H, T>
 {
     hasher: H,
     nodes: Vec<Node<T>>,
+    leaves: usize,
 }
 
 impl<H, T> MerkleTree<H, T>
@@ -45,14 +46,55 @@ impl<H, T> MerkleTree<H, T>
         }
     }
 
+    fn count_leaves(&self) -> Result<usize, &'static str> {
+        if (self.nodes.len() + 1usize).is_power_of_two() {
+            Ok((self.nodes.len() + 1usize) / 2usize)
+        } else {
+            Err("Merkle tree has not been constructed correctly")
+        }
+    }
+
+    // new leaves will be replace the ones that
+    // were duplicated just to make leaves == 2^n
+    fn add_leaves(&mut self, values: &mut Vec<T>) {
+        let count_new_leaves = self.leaves + values.len();
+
+        let n = count_new_leaves.next_power_of_two();
+        if count_new_leaves < n {
+            let pad_by = n - count_new_leaves;
+            if let Some(last) = values.last().map(|v| (*v).clone()) {
+                let extend_by = vec![last; pad_by];
+                values.extend(extend_by);
+            }
+        }
+        let mut new_leaf_nodes = vec![];
+        for v in values {
+            let leaf_node: Node<T> = Self::as_leaf(v, &mut self.hasher);
+            new_leaf_nodes.push(leaf_node);
+        }
+
+        let mut nodes = vec![];
+        self.nodes.truncate(self.leaves);
+        nodes.extend_from_slice(self.nodes.as_slice());
+        nodes.extend(new_leaf_nodes);
+
+        let parent_nodes: Vec<Node<T>> = Self::build_parent_nodes(&nodes, &mut self.hasher);
+
+        nodes.extend(parent_nodes);
+
+        self.leaves = count_new_leaves;
+        self.nodes = nodes;
+    }
+
     fn from_leaves(values: &mut Vec<T>, mut hasher: H) -> Result<Self, &'static str> {
         if values.len() == 0 {
             return Err("Leaves cannot be empty");
         }
 
+        let leaves = values.len();
         let n = values.len().next_power_of_two();
         if values.len() < n {
-            let pad_by = values.len().next_power_of_two() - values.len();
+            let pad_by = n - values.len();
             if let Some(last) = values.last().map(|v| (*v).clone()) {
                 let extend_by = vec![last; pad_by];
                 values.extend(extend_by);
@@ -72,6 +114,7 @@ impl<H, T> MerkleTree<H, T>
         Ok(MerkleTree {
             hasher: hasher,
             nodes: nodes,
+            leaves: leaves
         })
     }
 
@@ -218,6 +261,48 @@ mod tests {
             let root = mt.root().ok().unwrap();
             assert_eq!(root.value, None);
             assert_eq!(root.hash, "93993d7a938d03233784c7b480e32665b483542bd2d22e09bdd6dd590874d5c6");
+
+            let count_leaves = mt.count_leaves().ok().unwrap();
+            assert_eq!(count_leaves, 8usize);
+        } else {
+            assert!(false);
+        }
+    }
+
+    #[test]
+    fn test_add_leaves() {
+        let mut leaf_values: Vec<String> = vec![
+            String::from("tea"),
+            String::from("coffee"),
+            String::from("lemonade"),
+            String::from("wine"),
+            String::from("pepsi"),
+            String::from("cola")
+        ];
+        if let Some(mut mt) = MerkleTree::from_leaves(&mut leaf_values, Sha256::new()).ok() {
+            let mut root = mt.root().ok().unwrap();
+            assert_eq!(root.value, None);
+            assert_eq!(root.hash, "93993d7a938d03233784c7b480e32665b483542bd2d22e09bdd6dd590874d5c6");
+
+            let mut new_values: Vec<String> = vec![
+                String::from("beer"),
+                String::from("whisky")
+            ];
+            mt.add_leaves(&mut new_values);
+
+            // these parents don't change
+            assert_eq!(mt.nodes[8].hash, "d050213312c90773722bdb448110143b042d5f13de000e93b68a8769453ba38d");
+            assert_eq!(mt.nodes[9].hash, "f6c1118a17527ef7c6addbe574fa8c2256f98764cab46568c6bc7ab70e1ee808");
+            assert_eq!(mt.nodes[10].hash, "0f932c1de87f02001cca7bb3e7e9982db2cf0022a601461ed51da468c7caa423");
+            assert_eq!(mt.nodes[12].hash, "0e3bc6149e1f99b5192e73c92328a7e4bb95df94ad9b96253698418a2e746766");
+
+            // parents are updated
+            assert_eq!(mt.nodes[11].hash, "5b85aa79636ae07cfde54820867e1208ce80d8830c96fc0468877ea7048bb36a");
+            assert_eq!(mt.nodes[13].hash, "0e1364864c336487e488b4e2724412bc28cbf93a1233d34c849aa9a61032157b");
+            assert_eq!(mt.nodes[14].hash, "99f2eeb65950f598256a9d04084ec41ab9efcdbc573610fdad74162cebac5ac1");
+
+            root = mt.root().ok().unwrap();
+            assert_eq!(root.hash, "99f2eeb65950f598256a9d04084ec41ab9efcdbc573610fdad74162cebac5ac1");
         } else {
             assert!(false);
         }
